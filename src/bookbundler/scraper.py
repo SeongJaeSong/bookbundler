@@ -142,13 +142,28 @@ def fetch_used_listings(
         soup = _fetch_aladin_tab(
             client, item_id, tab_type, book_index, book, listings, max_pages,
         )
-        # 첫 탭의 첫 페이지에서 정가 추출
+        # 첫 탭의 첫 페이지에서 정가 + 새 책 판매가 추출
         if soup is not None and book.original_price is None:
             sidebar = soup.select_one(".Ere_prod_Binfowrap_used2")
             if sidebar:
-                m = re.search(r"정가\s*([\d,]+)\s*원", sidebar.get_text())
+                sidebar_text = sidebar.get_text()
+                m = re.search(r"정가\s*([\d,]+)\s*원", sidebar_text)
                 if m:
                     book.original_price = int(m.group(1).replace(",", ""))
+
+                # 새 책 판매가를 가상 매물로 추가
+                m2 = re.search(r"판매가\s*([\d,]+)\s*원", sidebar_text)
+                if m2:
+                    new_price = int(m2.group(1).replace(",", ""))
+                    listings.append(Listing(
+                        book_index=book_index,
+                        seller_id="aladin:new_book",
+                        seller_name="알라딘 새 책",
+                        price=new_price,
+                        condition="새 책",
+                        shipping_cost=ALADIN_DEFAULT_SHIPPING,
+                        free_shipping_threshold=15000,
+                    ))
 
     return listings
 

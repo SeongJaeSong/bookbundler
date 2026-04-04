@@ -92,8 +92,8 @@ def optimize(
     max_shipping = max(seller_shipping.values()) if seller_shipping else 10000
 
     # 상태 페널티: 1단계 차이에서 1000원 이하 가격 차이면 좋은 상태 선호
-    # 최상(0) → 상(1001) → 중(2002) → 하(3003)
-    condition_penalty = {"최상": 0, "상": 1001, "중": 2002, "하": 3003}
+    # 새 책(0) = 최상(0) → 상(1001) → 중(2002) → 하(3003)
+    condition_penalty = {"새 책": 0, "최상": 0, "상": 1001, "중": 2002, "하": 3003}
 
     # 목적함수: 책값 + 배송비 + 상태 페널티
     prob += (
