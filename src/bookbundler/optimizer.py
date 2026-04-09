@@ -23,8 +23,15 @@ from bookbundler.models import (
 def optimize(
     books: list[Book],
     listings: list[Listing],
+    strategy: str = "quality",
 ) -> OptimizationResult:
     """배송비 포함 총비용을 최소화하는 판매자 조합을 찾는다.
+
+    Args:
+        books: 구매하려는 책 목록
+        listings: 매물 목록
+        strategy: "quality" (상태 우선, 1000원 이내 차이면 좋은 상태)
+                  또는 "cheapest" (순수 최저가, 상태 무시)
 
     무료배송 임계값을 고려한다: 해당 판매자에서의 총구매액이
     free_shipping_threshold 이상이면 배송비 0원.
@@ -92,8 +99,13 @@ def optimize(
     max_shipping = max(seller_shipping.values()) if seller_shipping else 10000
 
     # 상태 페널티: 1단계 차이에서 1000원 이하 가격 차이면 좋은 상태 선호
-    # 새 책(0) = 최상(0) → 상(1001) → 중(2002) → 하(3003)
-    condition_penalty = {"새 책": 0, "최상": 0, "상": 1001, "중": 2002, "하": 3003}
+    # 상태 페널티: strategy에 따라 결정
+    # - "quality": 1000원 이내 차이면 좋은 상태 선호
+    # - "cheapest": 상태 무시, 순수 최저가
+    if strategy == "quality":
+        condition_penalty = {"새 책": 0, "최상": 0, "상": 1001, "중": 2002, "하": 3003}
+    else:
+        condition_penalty = {"새 책": 0, "최상": 0, "상": 0, "중": 0, "하": 0}
 
     # 목적함수: 책값 + 배송비 + 상태 페널티
     prob += (
