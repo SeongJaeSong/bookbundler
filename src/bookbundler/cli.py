@@ -3,9 +3,14 @@ from __future__ import annotations
 import click
 from rich.console import Console
 
-from bookbundler.display import display_comparison, display_result
+from bookbundler.display import (
+    display_comparison,
+    display_matched_books,
+    display_result,
+)
+from bookbundler.matching import is_isbn
 from bookbundler.optimizer import optimize
-from bookbundler.scraper import _is_isbn, scrape_books
+from bookbundler.scraper import scrape_books
 
 console = Console()
 
@@ -47,12 +52,14 @@ def search(
     """책 제목이나 ISBN으로 검색하여 최적 구매 조합을 찾습니다.
 
     쉼표로 구분하면 따옴표 없이 여러 권을 입력할 수 있습니다.
+    "제목 - 저자"처럼 저자를 함께 적으면 같은 제목의 다른 책과 구분합니다.
 
     \b
     예시:
         bookbundler search 데미안,노인과 바다,이방인
         bookbundler search 9788937460470,노인과 바다
         bookbundler search "데미안" "노인과 바다"
+        bookbundler search "즉흥연기 - 키스 존스톤,원칙 - 레이 달리오"
         bookbundler search -p aladin 데미안,이방인
     """
     # 쉼표로 구분된 입력 처리: 인자들을 합쳐서 쉼표로 분리
@@ -71,7 +78,7 @@ def search(
 
     console.print(f"\n[bold]검색 중...[/bold] {len(parsed)}권 ({platform_label})")
     for q in parsed:
-        label = "[dim](ISBN)[/dim]" if _is_isbn(q) else ""
+        label = "[dim](ISBN)[/dim]" if is_isbn(q) else ""
         console.print(f"  - {q} {label}")
     console.print()
 
@@ -79,6 +86,8 @@ def search(
         books, listings = scrape_books(
             parsed, condition_filter=condition, platforms=platforms,
         )
+
+    display_matched_books(books)
 
     if not listings:
         console.print("[red]매물을 찾지 못했습니다.[/red]")

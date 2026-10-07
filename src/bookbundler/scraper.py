@@ -7,6 +7,14 @@ from urllib.parse import quote, urlencode
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from bookbundler.matching import (
+    Candidate,
+    Match,
+    is_isbn,
+    normalize_isbn,
+    parse_query,
+    pick_best,
+)
 from bookbundler.models import Book, Listing
 
 # 알라딘 중고 검색 관련 상수
@@ -40,34 +48,28 @@ def create_client() -> httpx.Client:
     )
 
 
-def _is_isbn(text: str) -> bool:
-    """ISBN(10자리 또는 13자리 숫자)인지 판별한다."""
-    digits = text.replace("-", "").strip()
-    return digits.isdigit() and len(digits) in (10, 13)
+def search_book(client: httpx.Client, query: str) -> list[Candidate]:
+    """알라딘에서 책을 검색하여 후보 목록을 반환한다.
 
-
-def _normalize_isbn(text: str) -> str:
-    """ISBN에서 하이픈 등을 제거한다."""
-    return text.replace("-", "").strip()
-
-
-def search_book(client: httpx.Client, query: str) -> list[dict]:
-    """알라딘에서 책을 검색하여 기본 정보를 반환한다.
-
-    Returns:
-        list of dicts with keys: title, author, publisher, isbn, item_id, used_count
+    중고 매장(UsedStore) 검색은 알라딘이 직접 가진 중고만 보여줘서
+    판매자 중고만 있는 책을 놓치므로, 도서 검색으로 상품을 찾은 뒤
+    상품 ID로 중고 매물을 모은다.
     """
-    search_word = _normalize_isbn(query) if _is_isbn(query) else query
+    search_word = normalize_isbn(query) if is_isbn(query) else query
     params = {
         "SearchWord": search_word,
-        "SearchTarget": "UsedStore",
+        "SearchTarget": "Book",
     }
     resp = client.get(ALADIN_SEARCH_URL, params=params)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    return parse_aladin_search(resp.text)
 
-    results = []
-    # 검색 결과 항목들
+
+def parse_aladin_search(html: str) -> list[Candidate]:
+    """알라딘 검색 결과 HTML에서 후보 목록을 뽑는다."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    results: list[Candidate] = []
     items = soup.select("#Search3_Result .ss_book_box")
     if not items:
         items = soup.select(".ss_book_box")
@@ -83,10 +85,8 @@ def search_book(client: httpx.Client, query: str) -> list[dict]:
         # ItemId: div.ss_book_box의 itemid 속성 또는 링크에서 추출
         item_id = item.get("itemid")
         if item_id is None:
-            # 링크에서 ItemId 추출
             for a in item.find_all("a", href=True):
-                href = str(a["href"])
-                m = re.search(r"ItemId=(\d+)", href)
+                m = re.search(r"ItemId=(\d+)", str(a["href"]))
                 if m:
                     item_id = m.group(1)
                     break
@@ -94,24 +94,21 @@ def search_book(client: httpx.Client, query: str) -> list[dict]:
         if item_id is None:
             continue
 
-        # 저자/출판사: .ss_book_list의 두 번째 <li>
-        author = ""
-        publisher = ""
-        info_lis = item.select(".ss_book_list li")
-        if len(info_lis) >= 2:
-            info_text = info_lis[1].get_text(strip=True)
-            parts = info_text.split("|")
-            if len(parts) >= 1:
-                author = parts[0].strip()
-            if len(parts) >= 2:
-                publisher = parts[1].strip()
+        # 저자/출판사: 목록 앞쪽에 사은품 안내 <li>가 끼어들 때가 있어
+        # 위치 대신 검색 링크로 찾는다
+        authors = [
+            a.get_text(strip=True)
+            for a in item.select("a[href*='AuthorSearch']")
+        ]
+        publisher_el = item.select_one("a[href*='PublisherSearch']")
+        publisher = publisher_el.get_text(strip=True) if publisher_el else ""
 
-        results.append({
-            "title": title,
-            "author": author,
-            "publisher": publisher,
-            "item_id": str(item_id),
-        })
+        results.append(Candidate(
+            title=title,
+            item_id=str(item_id),
+            authors=authors,
+            publisher=publisher,
+        ))
 
     return results
 
@@ -151,9 +148,9 @@ def fetch_used_listings(
                 if m:
                     book.original_price = int(m.group(1).replace(",", ""))
 
-                # 새 책 판매가를 가상 매물로 추가
+                # 새 책 판매가를 가상 매물로 추가 (품절, 절판이면 살 수 없으므로 제외)
                 m2 = re.search(r"판매가\s*([\d,]+)\s*원", sidebar_text)
-                if m2:
+                if m2 and not is_new_book_sold_out(sidebar_text):
                     new_price = int(m2.group(1).replace(",", ""))
                     listings.append(Listing(
                         book_index=book_index,
@@ -166,6 +163,15 @@ def fetch_used_listings(
                     ))
 
     return listings
+
+
+# 중고 상품 페이지 사이드바의 "정가 20,000원 (품절)" 같은 표기
+_NEW_BOOK_UNAVAILABLE = re.compile(r"정가\s*[\d,]+\s*원\s*\([^)]*(?:품절|절판)[^)]*\)")
+
+
+def is_new_book_sold_out(sidebar_text: str) -> bool:
+    """알라딘 중고 페이지 사이드바에서 새 책이 품절이나 절판인지 판별한다."""
+    return _NEW_BOOK_UNAVAILABLE.search(sidebar_text) is not None
 
 
 def _fetch_aladin_tab(
@@ -324,36 +330,63 @@ def _parse_listing_row(row: Tag, book_index: int, book: Book) -> Listing | None:
 # ── YES24 스크래핑 ──────────────────────────────────────────────
 
 
-def yes24_search_book(client: httpx.Client, query: str) -> list[dict]:
-    """YES24에서 중고 책을 검색한다."""
-    search_word = _normalize_isbn(query) if _is_isbn(query) else query
-    params = {"domain": "USED", "query": search_word}
+def yes24_search_book(client: httpx.Client, query: str) -> list[Candidate]:
+    """YES24에서 중고 매물이 있는 책을 검색한다."""
+    search_word = normalize_isbn(query) if is_isbn(query) else query
+    params = {"domain": "ALL", "query": search_word}
     resp = client.get(YES24_SEARCH_URL, params=params)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # 새 세션의 첫 검색은 쿠키를 심으며 메인 페이지로 보내므로 한 번 더 요청한다
+    if not _is_yes24_search_page(resp):
+        time.sleep(REQUEST_DELAY)
+        resp = client.get(YES24_SEARCH_URL, params=params)
+        resp.raise_for_status()
+    return parse_yes24_search(resp.text)
 
-    results = []
-    # UsedShopHub 링크에서 goods_id 추출
-    for a in soup.find_all("a", href=True):
-        href = str(a["href"])
-        if "UsedShopHub/Hub/" in href:
-            text = a.get_text(strip=True)
-            m = re.search(r"Hub/(\d+)", href)
-            if m:
-                goods_id = m.group(1)
-                # 해당 goods_id의 책 제목 찾기
-                title = ""
-                for title_a in soup.select(f'a[href*="/goods/{goods_id}"]'):
-                    t = title_a.get_text(strip=True)
-                    if t and "새창" not in t and "회원리뷰" not in t and "새상품" not in t:
-                        title = t.replace("[도서]", "").replace("[중고]", "").strip()
-                        break
 
-                if title and goods_id not in [r["goods_id"] for r in results]:
-                    results.append({
-                        "title": title,
-                        "goods_id": goods_id,
-                    })
+def _is_yes24_search_page(resp: httpx.Response) -> bool:
+    return "/product/search" in resp.url.path.lower()
+
+
+def parse_yes24_search(html: str) -> list[Candidate]:
+    """YES24 검색 결과 HTML에서 중고 매물이 있는 종이책 후보를 뽑는다."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    results: list[Candidate] = []
+    seen: set[str] = set()
+    for item in soup.select("li[data-goods-no]"):
+        category_el = item.select_one(".gd_res")
+        if category_el and "eBook" in category_el.get_text():
+            continue
+
+        hub_el = item.select_one("a[href*='UsedShopHub/Hub/']")
+        if hub_el is None:
+            continue  # 중고 매물 없음
+        m = re.search(r"Hub/(\d+)", str(hub_el["href"]))
+        if m is None or m.group(1) in seen:
+            continue
+        goods_id = m.group(1)
+
+        title_el = item.select_one(".gd_name")
+        if title_el is None:
+            continue
+
+        auth_el = item.select_one(".info_auth")
+        authors = (
+            [a.get_text(strip=True) for a in auth_el.select("a")]
+            if auth_el else []
+        )
+        if auth_el and not authors:
+            authors = [auth_el.get_text(" ", strip=True)]
+        publisher_el = item.select_one(".info_pub")
+
+        seen.add(goods_id)
+        results.append(Candidate(
+            title=title_el.get_text(strip=True),
+            item_id=goods_id,
+            authors=authors,
+            publisher=publisher_el.get_text(strip=True) if publisher_el else "",
+        ))
 
     return results
 
@@ -497,46 +530,54 @@ def scrape_books(
     all_listings: list[Listing] = []
 
     with create_client() as client:
-        for i, query in enumerate(queries):
+        for i, raw in enumerate(queries):
+            query = parse_query(raw)
+            by_isbn = is_isbn(query.text)
             book_listings: list[Listing] = []
             book: Book | None = None
+            writer: str | None = None  # 알라딘에서 찾은 책의 대표 저자
 
             # ── 알라딘 ──
             if "aladin" in platforms:
-                if i > 0 or book_listings:
+                if i > 0:
                     time.sleep(REQUEST_DELAY)
-                search_results = search_book(client, query)
-                if search_results:
-                    result = search_results[0]
-                    book = Book(
-                        title=result["title"],
-                        author=result.get("author"),
-                        publisher=result.get("publisher"),
+                match = _choose(
+                    search_book(client, query.text), query.text, query.author, by_isbn,
+                )
+                if match is not None:
+                    book = _book_from_match(match, raw, query.author)
+                    writer = next(iter(match.candidate.authors), None)
+                    time.sleep(REQUEST_DELAY)
+                    book_listings.extend(
+                        fetch_used_listings(client, match.candidate.item_id, i, book)
                     )
-                    item_id = result.get("item_id")
-                    if item_id:
-                        time.sleep(REQUEST_DELAY)
-                        book_listings.extend(
-                            fetch_used_listings(client, item_id, i, book)
-                        )
 
             # ── YES24 ──
             if "yes24" in platforms:
                 time.sleep(REQUEST_DELAY)
-                yes_results = yes24_search_book(client, query)
-                if yes_results:
-                    result = yes_results[0]
-                    if book is None:
-                        book = Book(title=result["title"])
-                    goods_id = result.get("goods_id")
-                    if goods_id:
-                        time.sleep(REQUEST_DELAY)
-                        book_listings.extend(
-                            yes24_fetch_used_listings(client, goods_id, i, book)
+                if book is None:
+                    match = _choose(
+                        yes24_search_book(client, query.text),
+                        query.text, query.author, by_isbn,
+                    )
+                    if match is not None:
+                        book = _book_from_match(match, raw, query.author)
+                else:
+                    match = _find_same_book_on_yes24(client, book.title, writer)
+                if match is not None:
+                    time.sleep(REQUEST_DELAY)
+                    book_listings.extend(
+                        yes24_fetch_used_listings(
+                            client, match.candidate.item_id, i, book,
                         )
+                    )
 
             if book is None:
-                book = Book(title=query)
+                book = Book(
+                    title=query.text,
+                    query=raw,
+                    notes=["서점 검색에서 이 책을 찾지 못했습니다."],
+                )
             books.append(book)
 
             # 상태 필터 적용
@@ -549,3 +590,66 @@ def scrape_books(
             all_listings.extend(book_listings)
 
     return books, all_listings
+
+
+def _choose(
+    candidates: list[Candidate],
+    title: str,
+    author: str | None,
+    by_isbn: bool,
+) -> Match | None:
+    """검색 결과에서 살 책을 고른다. ISBN 검색은 결과가 곧 그 책이다."""
+    if by_isbn:
+        return Match(candidate=candidates[0], confident=True) if candidates else None
+    return pick_best(candidates, title, author)
+
+
+def _find_same_book_on_yes24(
+    client: httpx.Client,
+    title: str,
+    writer: str | None,
+) -> Match | None:
+    """알라딘에서 찾은 책과 같은 책을 YES24에서 찾는다.
+
+    제목만으로는 비슷한 제목의 책에 밀려 결과 첫 페이지에 안 나올 때가 있어서
+    ("문명전쟁"), 같은 책이 없으면 저자를 붙여 한 번 더 검색한다.
+    """
+    search_words = [title] + ([f"{title} {writer}"] if writer else [])
+    for n, search_word in enumerate(search_words):
+        if n > 0:
+            time.sleep(REQUEST_DELAY)
+        match = pick_best(yes24_search_book(client, search_word), title, writer)
+        if _is_same_book(match):
+            return match
+    return None
+
+
+def _is_same_book(match: Match | None) -> bool:
+    """두 번째 서점의 검색 결과가 이미 찾은 책과 같은 책인지 확인한다.
+
+    추정 결과나 저자가 다른 책을 받아들이면 다른 책의 매물이 섞이므로
+    제목과 저자가 모두 맞을 때만 인정한다.
+    """
+    return (
+        match is not None
+        and match.confident
+        and match.author_matched is not False
+    )
+
+
+def _book_from_match(match: Match, raw: str, author_hint: str | None) -> Book:
+    """고른 검색 결과로 Book을 만들고, 사용자가 확인할 점을 남긴다."""
+    cand = match.candidate
+    book = Book(
+        title=cand.title,
+        author=", ".join(cand.authors) or None,
+        publisher=cand.publisher or None,
+        query=raw,
+    )
+    if not match.confident:
+        book.notes.append(
+            "입력한 제목과 정확히 맞는 책이 없어 가장 비슷한 책을 골랐습니다."
+        )
+    if match.author_matched is False:
+        book.notes.append(f"저자가 입력한 이름({author_hint})과 다릅니다.")
+    return book
