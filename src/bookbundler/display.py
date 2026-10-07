@@ -3,12 +3,28 @@ from __future__ import annotations
 from itertools import groupby
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from bookbundler.models import OptimizationResult
+from bookbundler.models import Book, OptimizationResult
 
 console = Console()
+
+
+def display_matched_books(books: list[Book]) -> None:
+    """검색어마다 어떤 책을 찾았는지 보여준다. 엉뚱한 책을 사지 않게 확인용."""
+    console.print("[bold]찾은 책[/bold]")
+    for i, book in enumerate(books, start=1):
+        detail = " | ".join(part for part in (book.author, book.publisher) if part)
+        detail_text = f"  [dim]{escape(detail)}[/dim]" if detail else ""
+        console.print(
+            f"  {i}. {escape(book.query or book.title)} → "
+            f"[cyan]{escape(book.title)}[/cyan]{detail_text}"
+        )
+        for note in book.notes:
+            console.print(f"     [yellow]확인 필요: {escape(note)}[/yellow]")
+    console.print()
 
 
 def display_result(result: OptimizationResult) -> None:

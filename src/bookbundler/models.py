@@ -12,6 +12,8 @@ class Book:
     author: str | None = None
     publisher: str | None = None
     original_price: int | None = None  # 새 책 정가
+    query: str | None = None  # 사용자가 입력한 검색어
+    notes: list[str] = field(default_factory=list)  # 맞는 책인지 확인이 필요한 이유
 
 
 @dataclass

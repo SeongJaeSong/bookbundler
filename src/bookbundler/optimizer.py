@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pulp import (
-    PULP_CBC_CMD,
     LpBinary,
     LpContinuous,
     LpMinimize,
@@ -18,6 +17,7 @@ from bookbundler.models import (
     Listing,
     OptimizationResult,
 )
+from bookbundler.solver import make_solver
 
 
 def optimize(
@@ -103,7 +103,9 @@ def optimize(
     # - "quality": 1000원 이내 차이면 좋은 상태 선호
     # - "cheapest": 상태 무시, 순수 최저가
     if strategy == "quality":
-        condition_penalty = {"새 책": 0, "최상": 0, "상": 1001, "중": 2002, "하": 3003}
+        # 단계당 1000.25: 가격은 정수라 감점과 가격 차이가 같아지는 동점이 없다.
+        # (1001이면 정확히 1001원 차이에서 동점이 되어 솔버마다 결과가 달라짐)
+        condition_penalty = {"새 책": 0, "최상": 0, "상": 1000.25, "중": 2000.5, "하": 3000.75}
     else:
         condition_penalty = {"새 책": 0, "최상": 0, "상": 0, "중": 0, "하": 0}
 
@@ -180,7 +182,7 @@ def optimize(
             prob += s[si] == base_ship * y[si], f"ship_fixed_{si}"
 
     # 풀기
-    prob.solve(PULP_CBC_CMD(msg=0))
+    prob.solve(make_solver())
 
     if LpStatus[prob.status] != "Optimal":
         return OptimizationResult(books_not_found=books_not_found)
